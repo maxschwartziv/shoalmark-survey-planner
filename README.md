@@ -6,7 +6,8 @@ Plan side scan sonar surveys of inland water. Fetches a lake outline from the
 USGS National Hydrography Dataset, lets you mark where a boat can launch from shore, and turns it into straight survey lines
 exportable to GPX or QGroundControl.
 
-<img width="1920" height="1080" alt="surveyplanner" src="https://github.com/user-attachments/assets/f7b21fbc-2141-4973-9456-a4eb7ee39a82" />
+<img width="1920" height="1080" alt="surveyplanner" src="https://github.com/user-attachments/assets/b6e67ee9-b97a-465b-b6c3-e31f47d6cee4" />
+
 
 ## Run
 

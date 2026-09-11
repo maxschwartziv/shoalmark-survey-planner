@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.pyc
+
+# PyInstaller
+build/
+dist/
+*.spec.bak
+
+# Editors
+.vscode/
+.idea/
+
+# PyInstaller writes this each build; build.py regenerates it
+*.spec

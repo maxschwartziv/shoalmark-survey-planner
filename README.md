@@ -12,7 +12,11 @@ exportable to GPX or QGroundControl.
 
 Download the folder from
 [Releases](https://github.com/maxschwartziv/shoalmark-survey-planner/releases),
-unzip it anywhere, and run `SurveyPlanner.exe`. 
+unzip it anywhere, and run `SurveyPlanner.exe`.
+
+Windows flags any unsigned executable the first time it runs, through
+SmartScreen. Nothing is wrong with the download: Windows is reporting that
+it has not seen the file before. **More info**, then **Run anyway**.
 
 From source instead:
 
@@ -56,13 +60,13 @@ still work.
 can put a boat in.
 
 **Access points are remembered against the water they belong to.** They are
-saved to `%LOCALAPPDATA%\SurveyPlannerccess` 
+saved to `%LOCALAPPDATA%\SurveyPlannerccess`
 
 *Save shoreline…* also writes them into the file itself, and opening such a
 file adopts them back into the store.
 
 **3. Region of interest.** Tick *Click to draw a region*, click the corners,
-right-click to close. Lines are then built only inside it. 
+right-click to close. Lines are then built only inside it.
 
 **4. No-go areas.** Places the boat must not go. Tick *Click to draw a no-go
 area*, click the corners, right-click to close. *Find in imagery* fills the list from
@@ -125,10 +129,7 @@ and left out, with the acreage reported.
 ## Errors
 
 An unhandled error shows a dialog with the cause and appends the full traceback
-to `%LOCALAPPDATA%\SurveyPlanner\errors.log`. Tk's default is to print it to
-stderr, which a windowed program has nobody reading — the window just stops
-working, which is indistinguishable from a crash and impossible to report. If
-you hit one, that file says where.
+to `%LOCALAPPDATA%\SurveyPlanner\errors.log`.
 
 ## Layout
 
@@ -144,13 +145,19 @@ planner/
   exporters.py        GPX, QGroundControl .plan, GeoJSON
 ```
 
+## Build
+
+```
+pip install pyinstaller
+python build.py
+```
 
 The result is `dist\SurveyPlanner\`, about 188 MB, which zips for a
 release. Most of that is scikit-image and SciPy, which cannot be left out:
 the least-cost routing that keeps a transit on the water is theirs.
-`python build.py --onefile` produces a single file instead, which starts
-more slowly because it unpacks itself on every launch.
 
+`python build.py --onefile` produces a single file instead. It starts more
+slowly, because it unpacks itself into a temporary folder on every launch.
 ## Where It Fits
 
 Part of the [AnchorHold](https://github.com/maxschwartziv/anchorhold-web-viewer)

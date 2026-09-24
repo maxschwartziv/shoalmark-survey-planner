@@ -19,6 +19,12 @@ launch. When the chart folder holds its `track.geojson`, cells farther than
 `trust_within_ft` from the track are treated as unsounded. Half the line
 spacing of the survey that made the chart is about right.
 
+**A Humminbird recording works too.** Its pings carry a position and the depth
+the unit read (planner/humminbird.py); they are gridded here the way AnchorHold
+would, except that a cell only gets a depth from soundings within
+`trust_within_ft` of it - nothing is interpolated across open water - and a
+cell keeps the shallowest sounding that fell in it.
+
 Polygons come back in the planner's local feet, like every other no-go area.
 """
 
@@ -33,6 +39,14 @@ FT_PER_M = 3.280839895
 
 class DepthGrid:
     """One AnchorHold depth grid, optionally masked to its survey track."""
+
+    @classmethod
+    def from_array(cls, header: dict, depth_m, name: str) -> "DepthGrid":
+        """A grid built here rather than read from disk (from a recording)."""
+        grid = cls.__new__(cls)
+        grid.header, grid.depth_m = dict(header), depth_m
+        grid.folder, grid.name, grid.masked = "", name, 0
+        return grid
 
     def __init__(self, folder: str):
         head = os.path.join(folder, "depth_grid.json")
@@ -66,6 +80,8 @@ class DepthGrid:
         """Blank cells farther than trust_within_ft from the survey track."""
         import numpy as np
         from scipy import ndimage
+        if not self.folder:
+            return 0                    # built from soundings, already trimmed
         path = os.path.join(self.folder, "track.geojson")
         if trust_within_ft <= 0 or not os.path.exists(path):
             return 0
@@ -118,23 +134,100 @@ class DepthGrid:
         return list(shape.geoms) if shape.geom_type == "MultiPolygon" else [shape]
 
 
-def shallow_no_go(folders, frame, water=None, shallower_than_ft: float = 3.0,
+def grid_from_soundings(lons, lats, depths_m, name: str, trust_within_ft: float = 25.0,
+                        cell_m: float = 1.0, smooth_pings: int = 9) -> "DepthGrid":
+    """
+    A depth grid from point soundings, in AnchorHold's format.
+
+    Soundings are run through a rolling median over `smooth_pings` first: a
+    sounder that loses the bottom for a ping reads 0.2 m or 270 m, and one
+    ping of 270 m in a cell of its own would chart deep water that is not
+    there. Each cell keeps the shallowest sounding in it; empty cells within
+    `trust_within_ft` take the nearest sounding, the rest stay unsounded.
+    """
+    import numpy as np
+    from scipy import ndimage
+
+    lons = np.asarray(lons, float)
+    lats = np.asarray(lats, float)
+    depths = np.asarray(depths_m, float)
+    if smooth_pings > 1 and depths.size >= smooth_pings:
+        depths = ndimage.median_filter(depths, size=smooth_pings, mode="nearest")
+    lat0 = float(lats.mean())
+    d_lat = cell_m / 111320.0
+    d_lon = cell_m / (111320.0 * math.cos(math.radians(lat0)))
+    pad = trust_within_ft / FT_PER_M
+    lon_min = float(lons.min()) - pad / (111320.0 * math.cos(math.radians(lat0)))
+    lat_min = float(lats.min()) - pad / 111320.0
+    cols = int((lons.max() - lon_min) / d_lon + pad / cell_m) + 2
+    rows = int((lats.max() - lat_min) / d_lat + pad / cell_m) + 2
+    if rows * cols > 25_000_000:
+        raise ValueError("%s covers too much water for %.1f m cells" % (name, cell_m))
+    r = np.round((lats - lat_min) / d_lat).astype(int)
+    c = np.round((lons - lon_min) / d_lon).astype(int)
+    grid = np.full((rows, cols), np.inf)
+    np.minimum.at(grid, (r, c), depths)
+    have = np.isfinite(grid)
+    dist, (ri, ci) = ndimage.distance_transform_edt(~have, sampling=cell_m, return_indices=True)
+    grid = grid[ri, ci]
+    grid[dist * FT_PER_M > trust_within_ft] = np.nan
+    header = {"lonMin": lon_min, "latMin": lat_min, "dLon": d_lon, "dLat": d_lat,
+              "cols": cols, "rows": rows, "nodata": "nan"}
+    return DepthGrid.from_array(header, grid, name)
+
+
+def load_source(path: str, trust_within_ft: float = 25.0):
+    """
+    A DepthGrid from whatever was picked: an AnchorHold chart (its folder or
+    its depth_grid.json) or a Humminbird recording (its .DAT or its folder).
+    Returns (grid, note).
+    """
+    from planner import humminbird
+
+    path = os.path.abspath(path)
+    folder = path if os.path.isdir(path) else os.path.dirname(path)
+    base = os.path.basename(path).lower()
+    if base == "depth_grid.json" or (os.path.isdir(path)
+                                     and os.path.exists(os.path.join(path, "depth_grid.json"))):
+        grid = DepthGrid(folder)
+        masked = grid.mask_to_track(trust_within_ft)
+        return grid, ("%d interpolated cell(s) far from the track ignored" % masked
+                      if masked else "")
+    if base.endswith(".dat") or (os.path.isdir(path) and any(
+            f.upper().endswith(".SON") for f in os.listdir(path))):
+        lons, lats, depths, info = humminbird.soundings(path)
+        grid = grid_from_soundings(lons, lats, depths, info["name"], trust_within_ft)
+        dropped = []
+        if info["stale"]:
+            dropped.append("%d without a fix" % info["stale"])
+        if info["no_bottom"]:
+            dropped.append("%d without a bottom" % info["no_bottom"])
+        return grid, ("%s, %d pings%s" % (info["beam"], info["used"],
+                                          " (" + ", ".join(dropped) + " dropped)" if dropped else ""))
+    raise ValueError(os.path.basename(path) + " is neither an AnchorHold depth grid"
+                     " (depth_grid.json) nor a Humminbird recording (.DAT).")
+
+
+def shallow_no_go(sources, frame, water=None, shallower_than_ft: float = 3.0,
                   trust_within_ft: float = 25.0, min_area_ft2: float = 50.0):
     """
     No-go areas for every stretch charted shallower than `shallower_than_ft`.
 
-    Returns (zones, grids, notes): zones as {name, kind, geom, min_depth_ft}
-    ready for the no-go list, the loaded grids (kept for the boat export), and
-    a line of text per grid for the status bar.
+    `sources` are paths (chart folders, depth_grid.json, Humminbird .DAT) or
+    DepthGrids. Returns (zones, grids, notes): zones as {name, kind, geom,
+    min_depth_ft} ready for the no-go list, the grids (kept for the boat
+    export), and a line of text per source for the status bar.
     """
     import numpy as np
     from scipy import ndimage
     from shapely.ops import unary_union
 
     zones, grids, notes = [], [], []
-    for folder in folders:
-        grid = DepthGrid(folder)
-        masked = grid.mask_to_track(trust_within_ft)
+    for source in sources:
+        if isinstance(source, DepthGrid):
+            grid, extra = source, ""
+        else:
+            grid, extra = load_source(source, trust_within_ft)
         grids.append(grid)
         depth_ft = grid.depth_m * FT_PER_M
         shallow = np.isfinite(depth_ft) & (depth_ft < shallower_than_ft)
@@ -155,7 +248,7 @@ def shallow_no_go(folders, frame, water=None, shallower_than_ft: float = 3.0,
         notes.append("%s: %d shallow area(s) under %.1f ft; charted %.1f-%.1f ft%s" % (
             grid.name, found, shallower_than_ft,
             valid.min() if valid.size else 0, valid.max() if valid.size else 0,
-            (", %d interpolated cell(s) far from the track ignored" % masked) if masked else ""))
+            (", " + extra) if extra else ""))
 
     # grids that overlap find the same shoal twice: merge touching zones
     merged = []

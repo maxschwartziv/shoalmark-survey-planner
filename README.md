@@ -76,26 +76,50 @@ satellite imagery — see below.
 *Save no-go areas…* writes them two places at once: a store beside the program
 keyed to the waterbody, so fetching the same lake next season brings them back
 unasked, and a file you choose, so you can hand them to somebody else. Stored
-as lon/lat rings, so a file survives a different local frame. *Load…* reads one
-back.
+as lon/lat rings, so a file survives a different local frame.
+
+*Load…* takes several files at once, of three kinds:
+
+| File | What becomes no-go |
+|---|---|
+| Saved no-go areas (`.json` from *Save no-go areas…*) | the areas as saved |
+| AnchorHold depth grid (`depth_grid.json`) | water charted shallower than *Min depth* |
+| Humminbird recording (`R000xx.DAT`, with its folder beside it) | water sounded shallower than *Min depth* |
+
+Loaded areas are added to the list, not swapped for it.
 
 **Re-compute outline from imagery** (in *1. Water*) traces the shoreline off
 satellite imagery instead of trusting the drawn one, and *Find in imagery* (in
 *4. No-go areas*) lists what that trace cut out. Both run the same pass: Otsu
 threshold on brightness.  WIP, confirm the outline was drawn correctly
 
-**From depth grids…** reads charts built by
-[AnchorHold](https://github.com/maxschwartziv/anchorhold-web-viewer): pick the
-chart folder (the one holding `depth_grid.json`), and add more for the same
-lake if you have them. Everything charted shallower than *Shallower than (ft)*
-becomes a no-go area. Water that was never sounded does **not** - that is what
-a survey is for.
+**From depth grids…** does the same for folders: an
+[AnchorHold](https://github.com/maxschwartziv/anchorhold-web-viewer) chart
+folder (the one holding `depth_grid.json`) or a Humminbird recording's sonar
+folder, one after another for as many as the lake has.
 
-AnchorHold fills the gaps between soundings by interpolation, and a corner
-the boat never crossed can carry a depth invented from a reading a hundred feet
-away. When the chart folder has its `track.geojson`, cells farther than
-*Trust soundings within (ft)* from the track are ignored. About half the line
-spacing of the survey that made the chart is right.
+Everything sounded shallower than *Min depth (ft)* becomes a no-go area. Water
+that was never sounded does **not** - that is what a survey is for.
+
+**Depth grids.** AnchorHold fills the gaps between soundings by
+interpolation, and a corner the boat never crossed can carry a depth invented
+from a reading a hundred feet away. When the chart folder has its
+`track.geojson`, cells farther than *Trust soundings within (ft)* from the
+track are ignored. About half the line spacing of the survey that made the
+chart is right.
+
+**Recordings.** The depth and position in every ping header are read
+straight from the `.SON` (the 2D beam, B001 or B000) - no PINGMapper, no
+sonar decoding, a fraction of a second for an hour's recording. Pings stamped
+before the GPS had a fix, and pings with no bottom, are dropped; a rolling
+median over nine pings removes the single-ping readings of 0.2 m or 270 m a
+sounder makes when it loses the bottom. The pings are gridded at 1 m, each
+cell keeping its shallowest sounding and cells within *Trust soundings within*
+of a ping taking the nearest one. Depth is below the transducer, as the unit
+recorded it.
+
+Grids and recordings are also kept for the *Boat package*, which puts them on
+the boat's SD card as its chart.
 
 **5. Parameters.**
 
@@ -177,7 +201,8 @@ planner/
   plan.py             lines, ordering, days, verification
   access.py           water raster, viewsheds, station suggestion, routing
   nogo.py             islands from the outline, docks from OpenStreetMap
-  depthgrid.py        shallow no-go areas from AnchorHold depth grids
+  depthgrid.py        shallow no-go areas from AnchorHold depth grids and recordings
+  humminbird.py       depth soundings read from a Humminbird .DAT/.SON recording
   imagery.py          shoreline traced from satellite imagery
   exporters.py        GPX, QGroundControl .plan, GeoJSON
   boat.py             ArduPilot fences sized to the autopilot, chart for the SD card

@@ -244,6 +244,85 @@ def depth_grid_checks(frame, poly, out):
     chart = os.path.join(out, "boat", "chart", "depth_grid.bin")
     check("chart written for the SD card", os.path.getsize(chart) == cols * rows * 4)
 
+    recording_checks(frame, poly, out)
+
+
+def _fake_recording(folder, name, frame, start_xy, pings):
+    """
+    A Helix recording written ping by ping: `pings` is a list of
+    (dx_ft, dy_ft, depth_m) from `start_xy`, or None for a ping stamped with
+    no fix. Only the header fields the planner reads are filled in.
+    """
+    import math
+    import struct
+    from planner import humminbird
+
+    son_dir = os.path.join(folder, name)
+    os.makedirs(son_dir, exist_ok=True)
+    with open(os.path.join(folder, name + ".DAT"), "wb") as fh:
+        fh.write(bytes(64))
+    body = bytearray()
+    for i, ping in enumerate(pings):
+        if ping is None:
+            e = n = 0
+            depth_dm = 60
+        else:
+            dx, dy, depth_m = ping
+            lon, lat = frame.to_lonlat(start_xy[0] + dx, start_xy[1] + dy)
+            # the inverse of humminbird.lat_lon
+            phi = math.atan(math.tan(math.radians(lat)) / 1.0067642927)
+            n = int(round(humminbird.R_EARTH * math.log(math.tan((phi + math.pi / 2) / 2))))
+            e = int(round(math.radians(lon) * humminbird.R_EARTH))
+            depth_dm = int(round(depth_m * 10))
+        head = bytearray(humminbird.HEADER_LEN)
+        head[0:4] = humminbird.MAGIC
+        struct.pack_into(">I", head, 5, i)
+        struct.pack_into(">I", head, 10, i * 75)
+        struct.pack_into(">i", head, 15, e)
+        struct.pack_into(">i", head, 20, n)
+        struct.pack_into(">I", head, 35, depth_dm)
+        struct.pack_into(">I", head, 62, 16)
+        body += head + bytes(16)
+    with open(os.path.join(son_dir, "B001.SON"), "wb") as fh:
+        fh.write(body)
+    return os.path.join(folder, name + ".DAT")
+
+
+def recording_checks(frame, poly, out):
+    """
+    A Humminbird recording through the same road: 300 pings across the
+    lake at 2 ft spacing in 20 ft of water, with a 2 ft shoal in the
+    middle, three pings stamped before the GPS had a fix, one ping with no
+    bottom and one ping that read 270 m.
+    """
+    from planner import depthgrid
+
+    cx, cy = poly.representative_point().coords[0]
+    pings = [None, None, None]
+    for i in range(300):
+        depth = 0.6 if 130 <= i < 170 else 6.1
+        pings.append((i * 2.0 - 300.0, 0.0, depth))
+    pings[50] = (pings[50][0], 0.0, 0.0)          # no bottom
+    pings[80] = (pings[80][0], 0.0, 270.0)        # a spike
+    dat = _fake_recording(os.path.join(out, "recording"), "R00099", frame, (cx, cy), pings)
+    try:
+        zones, grids, notes = depthgrid.shallow_no_go([dat], frame, poly, 3.0, 15.0)
+    except Exception:
+        check("recording read", False)
+        traceback.print_exc()
+        return
+    check("recording gives one shallow area", len(zones) == 1, notes[0])
+    check("pings without a fix or a bottom are dropped",
+          "3 without a fix" in notes[0] and "1 without a bottom" in notes[0])
+    import numpy as np
+    deepest = float(np.nanmax(grids[0].depth_m))
+    check("a 270 m spike does not chart deep water", deepest < 7.0,
+          f"deepest cell {deepest:.1f} m")
+    if zones:
+        from shapely.geometry import Point
+        check("the shoal is where the recording found it",
+              zones[0]["geom"].contains(Point(cx, cy)))
+
 
 if __name__ == "__main__":
     args = sys.argv[1:]

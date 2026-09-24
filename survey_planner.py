@@ -291,7 +291,7 @@ class SurveyPlannerApp(tk.Tk):
         ttk.Button(no_go, text="From depth grids...",
                    command=self.on_depth_no_go).pack(fill="x", pady=(6, 2))
         shallow = ttk.Frame(no_go); shallow.pack(fill="x")
-        ttk.Label(shallow, text="Shallower than (ft)",
+        ttk.Label(shallow, text="Min depth (ft)",
                   width=26).pack(side="left")
         self.shallow_ft_var = tk.StringVar(value="3")
         ttk.Entry(shallow, textvariable=self.shallow_ft_var,
@@ -302,9 +302,10 @@ class SurveyPlannerApp(tk.Tk):
         self.trust_ft_var = tk.StringVar(value="25")
         ttk.Entry(trust, textvariable=self.trust_ft_var,
                   width=8).pack(side="left")
-        ttk.Label(no_go, text="Depth grids are AnchorHold chart folders"
-                  " (depth_grid.json). Charted water shallower than the"
-                  " depth above becomes no-go; water never sounded does not.",
+        ttk.Label(no_go, text="Load... and From depth grids... take AnchorHold"
+                  " depth grids (depth_grid.json) and Humminbird recordings"
+                  " (.DAT). Water sounded shallower than Min depth becomes"
+                  " no-go; water never sounded does not.",
                   foreground="#777", wraplength=260,
                   justify="left").pack(anchor="w")
 
@@ -1173,25 +1174,51 @@ class SurveyPlannerApp(tk.Tk):
                       " for this water: " + remembered)
 
     def on_load_no_go(self):
-        """Read no-go areas back from a file."""
-        if self.frame is None:
+        """
+        No-go areas from files: saved no-go areas, AnchorHold depth grids
+        (depth_grid.json) and Humminbird recordings (.DAT), several at once.
+
+        Saved areas load as they were saved. Grids and recordings become
+        no-go wherever they sounded shallower than Min depth.
+        """
+        if self.frame is None or self.poly is None:
             return messagebox.showinfo("Survey Planner",
                                        "Load a shoreline first.")
-        path = filedialog.askopenfilename(
-            title="Open no-go areas",
-            filetypes=[("No-go areas", "*.json"), ("All files", "*.*")])
-        if not path:
+        paths = filedialog.askopenfilenames(
+            title="Open no-go areas, depth grids or recordings",
+            filetypes=[("No-go, depth grid or recording", "*.json *.DAT *.dat"),
+                       ("Saved no-go areas", "*.json"),
+                       ("AnchorHold depth grid", "depth_grid.json"),
+                       ("Humminbird recording", "*.DAT *.dat"),
+                       ("All files", "*.*")])
+        if not paths:
             return
-        zones = shoreline.load_no_go(self.body or {}, self.frame, path)
-        if not zones:
-            return messagebox.showinfo(
-                "Survey Planner",
-                "No no-go areas could be read from that file.")
-        for zone in zones:
-            self._add_no_go(zone, redraw=False)
-        self._draw()
-        self._say("Loaded " + str(len(zones)) + " no-go area(s) from "
-                  + os.path.basename(path) + ".")
+        saved, sources = [], []
+        for path in paths:
+            if os.path.basename(path).lower() == "depth_grid.json" \
+                    or path.lower().endswith(".dat"):
+                sources.append(path)
+            else:
+                saved.append(path)
+        loaded = 0
+        for path in saved:
+            zones = shoreline.load_no_go(self.body or {}, self.frame, path)
+            if not zones:
+                messagebox.showinfo("Survey Planner", os.path.basename(path)
+                                    + " holds no no-go areas. Saved no-go files,"
+                                    " depth_grid.json and Humminbird .DAT"
+                                    " recordings can be loaded.")
+                continue
+            for zone in zones:
+                self._add_no_go(zone, redraw=False)
+            loaded += len(zones)
+        if saved:
+            self._draw()
+        if sources:
+            self._add_depth_sources(sources)
+        elif loaded:
+            self._say("Loaded " + str(loaded) + " no-go area(s) from "
+                      + ", ".join(os.path.basename(p) for p in saved) + ".")
 
     def on_remove_no_go(self):
         picked = self.no_go_list.curselection()
@@ -1213,55 +1240,72 @@ class SurveyPlannerApp(tk.Tk):
         self._say("Removed " + str(count) + " no-go area(s).")
         self._draw()
 
-    def on_depth_no_go(self):
-        """No-go areas from AnchorHold depth grids: charted water too shallow.
-
-        One or more chart folders, picked one at a time. The grids are kept
-        for the boat package, which puts them on the SD card for the
-        lookahead, so loading a grid here is also how it reaches the boat.
-        """
-        if self.poly is None or self.frame is None:
-            return messagebox.showinfo("Survey Planner", "Load a shoreline first.")
+    def _depth_settings(self):
+        """(min depth ft, trust ft) from section 4, or None after saying why."""
         try:
-            shallow_ft = float(self.shallow_ft_var.get())
-            trust_ft = float(self.trust_ft_var.get() or 0)
+            return (float(self.shallow_ft_var.get()),
+                    float(self.trust_ft_var.get() or 0))
         except ValueError:
-            return messagebox.showerror("Survey Planner",
-                                        "Shallower than and Trust soundings within"
-                                        " must be numbers of feet.")
-        folders = []
-        while True:
-            folder = filedialog.askdirectory(
-                title="AnchorHold chart folder (holds depth_grid.json)")
-            if not folder:
-                break
-            if not os.path.exists(os.path.join(folder, "depth_grid.json")):
-                messagebox.showerror("Survey Planner", folder + " has no"
-                                     " depth_grid.json. Pick the chart folder"
-                                     " AnchorHold wrote, output/<name>.")
-                continue
-            folders.append(folder)
-            if not messagebox.askyesno("Survey Planner",
-                                       "Add another depth grid for this lake?"):
-                break
-        if not folders:
-            return
+            messagebox.showerror("Survey Planner", "Min depth and Trust soundings"
+                                 " within must be numbers of feet.")
+            return None
+
+    def _add_depth_sources(self, sources):
+        """
+        No-go areas from depth grids and Humminbird recordings.
+
+        Every source becomes a depth grid - a recording is gridded from its
+        pings - and the grids are kept for the boat package, which puts them
+        on the SD card for the lookahead. Returns the number of zones added.
+        """
+        settings = self._depth_settings()
+        if settings is None:
+            return 0
+        min_ft, trust_ft = settings
+        self.config(cursor="watch")
+        self.update_idletasks()
         try:
             zones, grids, notes = depthgrid.shallow_no_go(
-                folders, self.frame, self.poly, shallow_ft, trust_ft)
+                sources, self.frame, self.poly, min_ft, trust_ft)
         except Exception as exc:
-            return messagebox.showerror("Survey Planner",
-                                        "Could not read the depth grid: " + str(exc))
+            messagebox.showerror("Survey Planner", "Could not read "
+                                 + ", ".join(os.path.basename(str(x)) for x in sources)
+                                 + ": " + str(exc))
+            return 0
+        finally:
+            self.config(cursor="")
         away = [g.name for g in grids if not self.poly.intersects(self._grid_box(g))]
         if away:
             messagebox.showwarning("Survey Planner", ", ".join(away) + " does not"
-                                   " overlap this lake - check it is the right chart.")
+                                   " overlap this lake - check it is the right one.")
         self.depth_grids.extend(grids)
         for zone in zones:
             self._add_no_go(zone, redraw=False)
         self._draw()
-        self._say(" ".join(notes) + ". " + str(len(zones)) + " shallow area(s)"
-                  " added as no-go. Compute to plan around them.")
+        self._say(" ".join(notes) + ". " + str(len(zones)) + " area(s) shallower than "
+                  + format(min_ft, "g") + " ft added as no-go. Compute to plan"
+                  " around them.")
+        return len(zones)
+
+    def on_depth_no_go(self):
+        """Depth grid or recording folders, picked one at a time."""
+        if self.poly is None or self.frame is None:
+            return messagebox.showinfo("Survey Planner", "Load a shoreline first.")
+        if self._depth_settings() is None:
+            return
+        folders = []
+        while True:
+            folder = filedialog.askdirectory(
+                title="AnchorHold chart folder or Humminbird recording folder")
+            if not folder:
+                break
+            folders.append(folder)
+            if not messagebox.askyesno("Survey Planner",
+                                       "Add another depth grid or recording"
+                                       " for this lake?"):
+                break
+        if folders:
+            self._add_depth_sources(folders)
 
     def _grid_box(self, grid):
         """A depth grid's extent in local feet."""

@@ -84,6 +84,19 @@ satellite imagery instead of trusting the drawn one, and *Find in imagery* (in
 *4. No-go areas*) lists what that trace cut out. Both run the same pass: Otsu
 threshold on brightness.  WIP, confirm the outline was drawn correctly
 
+**From depth grids…** reads charts built by
+[AnchorHold](https://github.com/maxschwartziv/anchorhold-web-viewer): pick the
+chart folder (the one holding `depth_grid.json`), and add more for the same
+lake if you have them. Everything charted shallower than *Shallower than (ft)*
+becomes a no-go area. Water that was never sounded does **not** - that is what
+a survey is for.
+
+AnchorHold fills the gaps between soundings by interpolation, and a corner
+the boat never crossed can carry a depth invented from a reading a hundred feet
+away. When the chart folder has its `track.geojson`, cells farther than
+*Trust soundings within (ft)* from the track are ignored. About half the line
+spacing of the survey that made the chart is right.
+
 **5. Parameters.**
 
 ```
@@ -105,6 +118,28 @@ threshold on brightness.  WIP, confirm the outline was drawn correctly
 
 **7. Export.** GPX and `.plan` are written one file per day; GeoJSON is the
 whole plan for GIS.
+
+**Boat package** is what an ArduPilot boat needs besides the mission:
+
+- **A fence per day** (`day_NN_fence.waypoints` for Mission Planner,
+  `day_NN_fence.plan` for QGroundControl): an inclusion polygon around that
+  day's water and an exclusion for every island and no-go area. Upload it with
+  the day's mission, with `FENCE_ENABLE` and `OA_TYPE=2` so Dijkstra routes
+  around the exclusions.
+- **`chart/`**, the depth grids from section 4, masked to where they were
+  sounded. Copy both files to the SD card as `APM/scripts/chart/` for
+  `shoal_guard.lua`'s lookahead.
+- **`ardupilot.parm`**, the fence and path-planning settings.
+
+A fence is one polygon per day rather than one for the lake because of where
+ArduPilot keeps it: a fixed 672 bytes of a Pixhawk1's storage, about 84 points
+across every polygon. A 306-acre NHD outline squeezed into that is simplified
+by ~70 ft, more than the shore setback, and survey lines end up outside it;
+one day's water fits within a few feet. Simplification always gives water up
+and grows no-go areas, never the reverse. Each access point keeps a 40 ft circle
+inside the fence and clear of exclusions, because Rover will not arm outside
+the fence or inside an exclusion, and launches sit in the shallows. The status
+line warns if any of the plan still falls outside its fence.
 
 ## Notes
 
@@ -142,8 +177,10 @@ planner/
   plan.py             lines, ordering, days, verification
   access.py           water raster, viewsheds, station suggestion, routing
   nogo.py             islands from the outline, docks from OpenStreetMap
+  depthgrid.py        shallow no-go areas from AnchorHold depth grids
   imagery.py          shoreline traced from satellite imagery
   exporters.py        GPX, QGroundControl .plan, GeoJSON
+  boat.py             ArduPilot fences sized to the autopilot, chart for the SD card
 ```
 
 ## Build

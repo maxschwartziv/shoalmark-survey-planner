@@ -168,12 +168,81 @@ def main(lat=DEFAULT_LAT, lon=DEFAULT_LON) -> int:
     check("shoreline round-trips", reloaded["name"] == body["name"])
     print(f"\n   files in {out}")
 
+    step("extra: depth grids and boat package")
+    depth_grid_checks(frame, poly, out)
+
     print("\n" + "=" * 58)
     if failures:
         print(f"{len(failures)} CHECK(S) FAILED: " + ", ".join(failures))
         return 1
     print("ALL CHECKS PASSED")
     return 0
+
+
+def depth_grid_checks(frame, poly, out):
+    """
+    A synthetic AnchorHold depth grid over the middle of the lake - 20 ft of
+    water with one 2 ft shoal - through no-go, planning and the boat package.
+    Synthetic so the check runs anywhere; the format is the pipeline's own.
+    """
+    import math
+
+    import numpy as np
+    from shapely.geometry import LineString, Point
+    from planner import boat, depthgrid
+
+    cx, cy = poly.representative_point().coords[0]
+    lon0, lat0 = frame.to_lonlat(cx - 300, cy - 300)
+    lon1, lat1 = frame.to_lonlat(cx + 300, cy + 300)
+    cols = rows = 121                                       # 5 ft cells
+    grid = os.path.join(out, "chart_synthetic")
+    os.makedirs(grid, exist_ok=True)
+    header = {"lonMin": lon0, "latMin": lat0, "dLon": (lon1 - lon0) / (cols - 1),
+              "dLat": (lat1 - lat0) / (rows - 1), "cols": cols, "rows": rows, "nodata": "nan"}
+    ys, xs = np.mgrid[0:rows, 0:cols]
+    depth_ft = np.where(np.hypot(xs - 60, ys - 60) * 5.0 < 40, 2.0, 20.0)
+    with open(os.path.join(grid, "depth_grid.json"), "w") as f:
+        json.dump(header, f)
+    (depth_ft / 3.280839895).astype("<f4").tofile(os.path.join(grid, "depth_grid.bin"))
+
+    try:
+        zones, grids, notes = depthgrid.shallow_no_go([grid], frame, poly, 3.0, 0)
+    except Exception:
+        check("depth grid read", False)
+        traceback.print_exc()
+        return
+    if not check("one shallow area found", len(zones) == 1, notes[0]):
+        return
+    shoal = zones[0]["geom"]
+    check("its size matches the shoal", 0.8 < shoal.area / (math.pi * 40 * 40) < 1.3,
+          f"{shoal.area:,.0f} sq ft")
+    check("centred on the shoal", shoal.contains(Point(cx, cy)))
+
+    settings = planning.PlanSettings(spacing_ft=40, setback_ft=50, speed_mph=3.0,
+                                     square_blocks=False, require_line_of_sight=False,
+                                     no_go=[shoal])
+    days, _ = planning.build_plan(poly, settings)
+    lines = [LineString(l["coords"]) for d in days for l in d
+             if l.get("kind") not in ("return",) and len(l["coords"]) > 1]
+    hit = sum(l.intersection(shoal).length for l in lines)
+    check("survey lines stay out of the shoal", hit < 1.0, f"{hit:.0f} ft inside")
+
+    tracks = [planning.mission_track(d) for d in days]
+    launch = [tracks[0][0]] if tracks and tracks[0] else []
+    info = boat.write_package(os.path.join(out, "boat"), frame, poly, zones, grids,
+                              launches=launch, tracks=tracks)
+    check("fence fits Pixhawk1 storage", info["bytes"] <= info["budget"],
+          f"{info['vertices']} points, {info['bytes']} of {info['budget']} bytes, "
+          f"simplified {info['tolerance_ft']:.0f} ft around {info['fenced']}")
+    outside = sum(LineString(l["coords"]).difference(fence["allowed"]).length
+                  for day, fence in zip(days, info["fences"]) for l in day
+                  if l.get("kind") != "return" and len(l["coords"]) > 1)
+    check("each day's survey lines are inside its fence", outside < 1.0,
+          f"{len(info['fences'])} fence(s), {outside:.0f} ft outside")
+    print(f"          whole route outside the fence: {info['outside_ft']:.0f} ft"
+          " (transits between lines are reported, not failed)")
+    chart = os.path.join(out, "boat", "chart", "depth_grid.bin")
+    check("chart written for the SD card", os.path.getsize(chart) == cols * rows * 4)
 
 
 if __name__ == "__main__":
